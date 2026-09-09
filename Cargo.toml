@@ -1,0 +1,33 @@
+[package]
+name = "opencast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "An open-source, keyboard-first desktop file launcher and calculator, built in Rust"
+license = "MIT"
+repository = "https://github.com/AverWasTaken/opencast"
+
+[dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "accesskit"] }
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+open = "5"
+meval = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+screenshot = ["eframe/__screenshot"]
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.15", default-features = false }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
