@@ -37,11 +37,19 @@ impl Snapshot {
         for root in roots {
             let walker = ignore::WalkBuilder::new(root)
                 .hidden(true)
+                .ignore(false)
                 .git_ignore(false)
                 .git_exclude(false)
                 .git_global(false)
                 .follow_links(false)
                 .filter_entry(|e| {
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::MetadataExt;
+                        if e.metadata().is_ok_and(|m| m.file_attributes() & 0x6 != 0) {
+                            return false;
+                        }
+                    }
                     !matches!(
                         e.file_name().to_str(),
                         Some(

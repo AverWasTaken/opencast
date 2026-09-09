@@ -1,6 +1,7 @@
-#define AppVersion GetEnv('OPENCAST_VERSION')
-#if AppVersion == ""
+#if GetEnv('OPENCAST_VERSION') == ""
   #define AppVersion "0.1.0"
+#else
+  #define AppVersion GetEnv('OPENCAST_VERSION')
 #endif
 [Setup]
 AppId={{11E34A8A-DC59-4BD1-A426-36EC26649742}
@@ -20,6 +21,7 @@ OutputBaseFilename=OpenCast-{#AppVersion}-windows-x64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\..\assets\opencast.ico
 UninstallDisplayIcon={app}\opencast.exe
 LicenseFile=..\..\LICENSE
 CloseApplications=yes

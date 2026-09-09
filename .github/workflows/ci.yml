@@ -25,6 +25,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging/windows/opencast.iss'
+      - name: Smoke-test Windows installation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/smoke-test.ps1
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
