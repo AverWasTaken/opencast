@@ -27,6 +27,9 @@ lto = "thin"
 strip = true
 
 [target.'cfg(windows)'.dependencies]
+window-vibrancy = "0.6"
+wgpu = { version = "27", default-features = false, features = ["dx12", "wgsl"] }
+eframe = { version = "0.33", default-features = false, features = ["wgpu"] }
 rfd = { version = "0.15", default-features = false }
 
 [target.'cfg(windows)'.build-dependencies]

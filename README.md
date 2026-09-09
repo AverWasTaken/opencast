@@ -4,6 +4,10 @@ A small, open-source Windows launcher for finding files and doing quick calculat
 
 ![OpenCast file search](docs/file-search.png)
 
+![OpenCast actions](docs/actions.png)
+
+The compact palette uses a single search row, inline file types, and a searchable actions panel. Windows uses Segoe UI and native acrylic blur where supported; the screenshots show the tinted Linux fallback.
+
 ## Install on Windows
 
 1. Open [Releases](https://github.com/AverWasTaken/opencast/releases).
@@ -32,7 +36,7 @@ Documents, Downloads and Desktop are indexed on first launch when available. Use
 | Ctrl+, | Search settings |
 | Escape | Dismiss a panel, clear the query, then close the app |
 
-Click a file to select it; double-click to open. Choose the **Files** tab to search for a filename that looks like a calculation. Calculator errors are shown inline. On macOS source builds, Command replaces Ctrl.
+Click a file to select it; double-click to open. Choose **Actions → Search files only** to search for a filename that looks like a calculation. Calculator errors are shown inline. On macOS source builds, Command replaces Ctrl.
 
 ## Supported units
 

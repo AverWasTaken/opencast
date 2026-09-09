@@ -8,11 +8,12 @@ $appPath = Join-Path $installDir 'opencast.exe'
 if (!(Test-Path $appPath)) { throw 'Installed executable is missing' }
 $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'OpenCast.lnk'
 if (!(Test-Path $shortcut)) { throw 'Start menu shortcut is missing' }
-$app = Start-Process $appPath -PassThru
+$errorLog = Join-Path $env:RUNNER_TEMP "opencast-startup.log"
+$app = Start-Process $appPath -PassThru -RedirectStandardError $errorLog
 try {
     Start-Sleep -Seconds 4
     $app.Refresh()
-    if ($app.HasExited) { throw "App exited during startup: $($app.ExitCode)" }
+    if ($app.HasExited) { Get-Content $errorLog; throw "App exited during startup: $($app.ExitCode)" }
 } finally {
     if (!$app.HasExited) { Stop-Process -Id $app.Id -Force }
 }

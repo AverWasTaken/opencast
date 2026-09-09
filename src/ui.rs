@@ -10,12 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-const BG: Color32 = Color32::from_rgb(31, 29, 39);
-const SURFACE: Color32 = Color32::from_rgb(43, 39, 54);
-const SELECTED: Color32 = Color32::from_rgb(65, 57, 80);
+const BG: Color32 = Color32::from_rgb(35, 34, 38);
+const SURFACE: Color32 = Color32::from_rgb(43, 41, 43);
+const SELECTED: Color32 = Color32::from_rgba_premultiplied(27, 27, 27, 27);
 const TEXT: Color32 = Color32::from_rgb(239, 236, 246);
-const MUTED: Color32 = Color32::from_rgb(165, 157, 180);
-const ACCENT: Color32 = Color32::from_rgb(197, 177, 246);
+const MUTED: Color32 = Color32::from_rgb(174, 169, 180);
 const MINT: Color32 = Color32::from_rgb(151, 218, 190);
 
 #[derive(Default, Serialize, Deserialize)]
@@ -64,10 +63,40 @@ pub struct OpenCast {
     focus_search: bool,
     pending: bool,
     scroll_selected: bool,
+    action_query: String,
+    action_selected: usize,
+    focus_actions: bool,
+    backdrop: bool,
 }
 impl OpenCast {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
+        #[cfg(windows)]
+        let backdrop = window_vibrancy::apply_acrylic(cc, Some((25, 24, 27, 150))).is_ok();
+        #[cfg(not(windows))]
+        let backdrop = false;
+        // Use the platform face without redistributing proprietary system fonts.
+        let mut fonts = egui::FontDefinitions::default();
+        let system_font = if cfg!(windows) {
+            std::env::var_os("WINDIR")
+                .map(PathBuf::from)
+                .map(|p| p.join("Fonts/segoeui.ttf"))
+        } else {
+            Some(PathBuf::from(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ))
+        };
+        if let Some(bytes) = system_font.and_then(|p| std::fs::read(p).ok()) {
+            fonts
+                .font_data
+                .insert("system".into(), egui::FontData::from_owned(bytes).into());
+            fonts
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
+                .insert(0, "system".into());
+        }
+        ctx.set_fonts(fonts);
         let mut style = (*ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
         style.visuals.override_text_color = Some(TEXT);
@@ -80,7 +109,7 @@ impl OpenCast {
         style.visuals.widgets.hovered.bg_fill = SELECTED;
         style.visuals.widgets.active.bg_fill = SELECTED;
         style.visuals.window_corner_radius = 14.into();
-        style.spacing.item_spacing = Vec2::new(10.0, 10.0);
+        style.spacing.item_spacing = Vec2::new(8.0, 1.0);
         style
             .text_styles
             .insert(egui::TextStyle::Body, FontId::proportional(15.0));
@@ -215,6 +244,10 @@ impl OpenCast {
             focus_search: !settings,
             pending: false,
             scroll_selected: false,
+            action_query: String::new(),
+            action_selected: 0,
+            focus_actions: false,
+            backdrop,
         }
     }
     fn refresh(&mut self) {
@@ -309,154 +342,87 @@ impl OpenCast {
         self.index_status = "Updating your file index…".into();
         let _ = self.scan.send(self.roots.clone());
     }
-    fn examples(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new("A little less clicking.")
-                .size(23.0)
-                .color(TEXT),
-        );
-        ui.label(RichText::new("Find a file. Work out a number. Keep moving.").color(MUTED));
-        ui.add_space(15.0);
-        for (icon, title, example) in [
-            ("=", "Calculate", "(24 + 8) / 2"),
-            ("<>", "Convert units", "10 km to mi"),
-            ("C", "Convert temperature", "72 f to c"),
-        ] {
-            let response = egui::Frame::new()
-                .fill(SURFACE)
-                .corner_radius(10)
-                .inner_margin(14)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(icon).size(22.0).color(ACCENT));
-                        ui.add_space(8.0);
-                        ui.label(title);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(example).monospace().color(MUTED));
-                        });
-                    });
-                })
-                .response;
-            if ui
-                .interact(response.rect, response.id.with(title), egui::Sense::click())
-                .clicked()
-            {
-                self.query = example.into();
-                self.refresh();
-                self.focus_search = true;
-            }
-            ui.add_space(2.0);
-        }
+    fn toggle_actions(&mut self) {
+        self.actions = !self.actions;
+        self.action_query.clear();
+        self.action_selected = 0;
+        self.focus_actions = self.actions;
+        self.focus_search = !self.actions;
     }
     fn file_rows(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(if self.query.is_empty() {
-                    "RECENTLY MODIFIED"
-                } else {
-                    "FILES & FOLDERS"
-                })
-                .size(11.0)
-                .color(MUTED),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{} results · {:.1} ms",
-                        self.results.len(),
-                        self.search_ms
-                    ))
-                    .size(11.0)
-                    .color(MUTED),
-                );
-            });
-        });
-        ui.add_space(5.0);
         if self.results.is_empty() {
-            ui.add_space(25.0);
-            ui.label(
-                RichText::new(if self.pending {
-                    "Searching…"
-                } else if self.indexing {
-                    "Your files are on their way…"
-                } else {
-                    "No files found"
-                })
-                .size(21.0),
-            );
-            ui.label(
-                RichText::new("Try part of a file name, or add a folder in Settings.").color(MUTED),
-            );
+            ui.add_space(28.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(if self.pending || self.indexing {
+                        "Indexing your files…"
+                    } else {
+                        "No files found"
+                    })
+                    .size(17.0),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Try another name, or add a folder in Search settings.")
+                        .color(MUTED),
+                );
+                if ui
+                    .add(egui::Button::new("Search settings").frame(false))
+                    .clicked()
+                {
+                    self.settings = true;
+                }
+            });
         }
         let mut activate = false;
         for (i, entry) in self.results.iter().enumerate() {
             let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 62.0), egui::Sense::click());
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 43.0), egui::Sense::click());
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    true,
+                    self.selected == i,
+                    &entry.name,
+                )
+            });
             if self.selected == i || response.hovered() {
                 ui.painter().rect_filled(
                     rect,
-                    10,
+                    12,
                     if self.selected == i {
                         SELECTED
                     } else {
-                        SURFACE
+                        Color32::from_white_alpha(10)
                     },
                 );
             }
-            let icon_rect =
-                egui::Rect::from_min_size(rect.min + Vec2::new(12.0, 12.0), Vec2::splat(36.0));
-            let extension = entry
-                .path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_uppercase();
-            let (icon, color) = if entry.directory {
-                ("DIR", MINT)
-            } else {
-                (
-                    extension.get(..extension.len().min(4)).unwrap_or("FILE"),
-                    ACCENT,
-                )
-            };
-            ui.painter()
-                .rect_filled(icon_rect, 8, color.gamma_multiply(0.16));
-            ui.painter().text(
-                icon_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                icon,
-                FontId::monospace(10.0),
+            let (kind, color, glyph) = file_kind(entry);
+            file_icon(
+                ui.painter(),
+                egui::Rect::from_center_size(rect.min + Vec2::new(22.0, 21.5), Vec2::splat(25.0)),
                 color,
+                glyph,
             );
-            let mut name_job = egui::text::LayoutJob::simple_singleline(
-                entry.name.clone(),
-                FontId::proportional(16.0),
-                TEXT,
-            );
-            name_job.wrap.max_width = rect.width() - 85.0;
-            name_job.wrap.max_rows = 1;
-            name_job.wrap.break_anywhere = true;
+            let label = ui
+                .painter()
+                .layout_no_wrap(kind.into(), FontId::proportional(15.0), MUTED);
+            let type_width = label.size().x;
             ui.painter().galley(
-                rect.min + Vec2::new(62.0, 10.0),
-                ui.fonts_mut(|f| f.layout_job(name_job)),
-                TEXT,
-            );
-            let path = entry
-                .path
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let mut job =
-                egui::text::LayoutJob::simple_singleline(path, FontId::proportional(12.0), MUTED);
-            job.wrap.max_width = rect.width() - 85.0;
-            job.wrap.max_rows = 1;
-            job.wrap.break_anywhere = true;
-            ui.painter().galley(
-                rect.min + Vec2::new(62.0, 35.0),
-                ui.fonts_mut(|f| f.layout_job(job)),
+                egui::pos2(
+                    rect.right() - type_width - 12.0,
+                    rect.center().y - label.size().y / 2.0,
+                ),
+                label,
                 MUTED,
+            );
+            clipped_text(
+                ui,
+                &entry.name,
+                rect.min + Vec2::new(48.0, 11.5),
+                rect.width() - type_width - 82.0,
+                15.5,
+                TEXT,
             );
             if response.clicked() {
                 self.selected = i;
@@ -468,13 +434,108 @@ impl OpenCast {
             if self.selected == i && self.scroll_selected {
                 response.scroll_to_me(Some(egui::Align::Center));
             }
+            if !self.actions && !self.settings {
+                response.on_hover_text(entry.path.to_string_lossy());
+            }
         }
         self.scroll_selected = false;
         if activate {
             self.activate(ui.ctx());
         }
     }
+    fn examples(&mut self, ui: &mut egui::Ui) {
+        for (title, expression, kind) in [
+            ("Calculator", "(24 + 8) / 2", "Calculation"),
+            ("Convert units", "10 km to mi", "Conversion"),
+            ("Convert temperature", "72 f to c", "Conversion"),
+        ] {
+            let (rect, response) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 43.0), egui::Sense::click());
+            if response.hovered() {
+                ui.painter().rect_filled(rect, 12, SELECTED);
+            }
+            file_icon(
+                ui.painter(),
+                egui::Rect::from_center_size(rect.min + Vec2::new(22.0, 21.5), Vec2::splat(25.0)),
+                Color32::from_rgb(224, 151, 66),
+                3,
+            );
+            ui.painter().text(
+                rect.min + Vec2::new(48.0, 21.5),
+                egui::Align2::LEFT_CENTER,
+                title,
+                FontId::proportional(15.5),
+                TEXT,
+            );
+            ui.painter().text(
+                rect.right_center() - Vec2::new(12.0, 0.0),
+                egui::Align2::RIGHT_CENTER,
+                kind,
+                FontId::proportional(15.0),
+                MUTED,
+            );
+            if response.clicked() {
+                self.query = expression.into();
+                self.refresh();
+                self.focus_search = true;
+            }
+        }
+    }
+    fn action_items(&self) -> Vec<(u8, &'static str, &'static str)> {
+        let mut items = vec![];
+        if self.answer.is_some() && self.mode != Mode::Files {
+            items.push((0, "Copy result", "Enter"));
+        } else if self.mode != Mode::Calculator && !self.results.is_empty() {
+            items.extend([
+                (0, "Open file", "Enter"),
+                (1, "Copy path", "Ctrl Shift C"),
+                (2, "Open containing folder", ""),
+            ]);
+        }
+        items.extend([
+            (3, "Search settings", "Ctrl ,"),
+            (4, "Rebuild file index", ""),
+            (5, "Search everything", ""),
+            (6, "Search files only", ""),
+            (7, "Calculator", ""),
+            (8, "Quit OpenCast", ""),
+        ]);
+        let query = self.action_query.to_lowercase();
+        items.retain(|(_, label, _)| label.to_lowercase().contains(&query));
+        items
+    }
+    fn run_action(&mut self, id: u8, ctx: &egui::Context) {
+        match id {
+            0 => self.activate(ctx),
+            1 => self.copy(ctx),
+            2 => {
+                if let Some(path) = self
+                    .results
+                    .get(self.selected)
+                    .and_then(|e| e.path.parent())
+                    && let Err(e) = open::that_detached(path)
+                {
+                    self.notify(format!("Could not open folder: {e}"));
+                }
+            }
+            3 => self.settings = true,
+            4 => self.reindex(),
+            5..=7 => {
+                self.mode = match id {
+                    6 => Mode::Files,
+                    7 => Mode::Calculator,
+                    _ => Mode::All,
+                };
+                self.selected = 0;
+            }
+            8 => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            _ => (),
+        }
+        self.actions = false;
+        self.focus_search = !self.settings;
+    }
 }
+
 impl eframe::App for OpenCast {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
@@ -495,7 +556,7 @@ impl eframe::App for OpenCast {
                         elapsed.as_secs_f64()
                     );
                     if let Some(error) = error {
-                        self.notify(format!("Index works, but could not save cache: {error}"));
+                        self.notify(format!("Could not save index cache: {error}"));
                     }
                     self.pending = true;
                     let _ = self.search.send(self.query.clone());
@@ -515,9 +576,12 @@ impl eframe::App for OpenCast {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.settings = !self.settings;
+            self.actions = false;
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
-            self.actions = !self.actions;
+        if !self.settings
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K))
+        {
+            self.toggle_actions();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             if self.settings || self.actions {
@@ -553,257 +617,362 @@ impl eframe::App for OpenCast {
             }
         }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .corner_radius(18)
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(82, 73, 97)))
-                    .inner_margin(20),
-            )
+            .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-                    let c = rect.center();
-                    ui.painter().add(egui::Shape::closed_line(
-                        vec![
-                            c + Vec2::new(0.0, -9.0),
-                            c + Vec2::new(9.0, 0.0),
-                            c + Vec2::new(0.0, 9.0),
-                            c + Vec2::new(-9.0, 0.0),
-                        ],
-                        Stroke::new(2.0_f32, ACCENT),
-                    ));
-                    ui.label(RichText::new("OpenCast").size(15.0).strong());
+                let outer = ui.max_rect().shrink(1.0);
+                glass(ui.painter(), outer, self.backdrop);
+                ui.painter().rect_stroke(
+                    outer,
+                    17,
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(48)),
+                    egui::StrokeKind::Inside,
+                );
+                let header = egui::Rect::from_min_max(
+                    outer.min,
+                    egui::pos2(outer.right(), outer.top() + 60.0),
+                );
+                let footer = egui::Rect::from_min_max(
+                    egui::pos2(outer.left(), outer.bottom() - 44.0),
+                    outer.max,
+                );
+                ui.painter().line_segment(
+                    [header.left_bottom(), header.right_bottom()],
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(18)),
+                );
+                ui.painter().rect_filled(
+                    footer,
+                    egui::CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: 16,
+                        se: 16,
+                    },
+                    Color32::from_rgba_unmultiplied(26, 26, 27, 215),
+                );
+                ui.painter().line_segment(
+                    [footer.left_top(), footer.right_top()],
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(22)),
+                );
+                let drag = ui.interact(
+                    egui::Rect::from_min_max(
+                        header.min,
+                        header.min + Vec2::new(header.width(), 12.0),
+                    ),
+                    ui.id().with("drag"),
+                    egui::Sense::drag(),
+                );
+                if drag.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(header.shrink2(Vec2::new(18.0, 17.0))),
+                    |ui| {
+                        let hint = match self.mode {
+                            Mode::Files => "Search files…",
+                            Mode::Calculator => "Calculate or convert…",
+                            Mode::All => "Search files or calculate…",
+                        };
+                        let input = ui.add_enabled(
+                            !self.actions && !self.settings,
+                            egui::TextEdit::singleline(&mut self.query)
+                                .id_salt("search")
+                                .interactive(!self.actions && !self.settings)
+                                .font(FontId::proportional(20.0))
+                                .frame(false)
+                                .margin(Vec2::ZERO)
+                                .desired_width(ui.available_width())
+                                .hint_text(hint),
+                        );
+                        if self.focus_search && !self.settings {
+                            input.request_focus();
+                            self.focus_search = false;
+                        }
+                        if input.changed() {
+                            self.refresh();
+                        }
+                    },
+                );
+                let content = egui::Rect::from_min_max(
+                    header.left_bottom() + Vec2::new(8.0, 9.0),
+                    footer.right_top() - Vec2::new(8.0, 8.0),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                    ui.set_clip_rect(content);
+                    egui::ScrollArea::vertical()
+                        .id_salt("files")
+                        .auto_shrink([false, false])
+                        .max_height(content.height())
+                        .show(ui, |ui| {
+                            if self.mode != Mode::Files
+                                && let Some(answer) = &self.answer
+                            {
+                                let answer = answer.display();
+                                ui.add_space(24.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(18.0);
+                                    ui.label(RichText::new("Calculator").size(14.0).color(MUTED));
+                                });
+                                ui.add_space(20.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(18.0);
+                                    ui.label(RichText::new(answer).size(38.0));
+                                });
+                            } else {
+                                if let Some(error) = &self.calc_error {
+                                    ui.add_space(10.0);
+                                    ui.label(RichText::new(error).color(MUTED));
+                                    ui.add_space(10.0);
+                                }
+                                if self.mode == Mode::Calculator
+                                    || (self.query.is_empty() && self.results.is_empty())
+                                {
+                                    self.examples(ui);
+                                } else {
+                                    self.file_rows(ui);
+                                }
+                            }
+                        });
+                });
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(footer.shrink2(Vec2::new(16.0, 9.0))),
+                    |ui| {
+                        ui.horizontal_centered(|ui| {
+                            let (dot, response) =
+                                ui.allocate_exact_size(Vec2::new(10.0, 20.0), egui::Sense::hover());
+                            ui.painter().circle_filled(
+                                dot.center(),
+                                2.5,
+                                if self.indexing {
+                                    MUTED
+                                } else {
+                                    MINT.gamma_multiply(0.7)
+                                },
+                            );
+                            response.on_hover_text(format!(
+                                "{}\nLast search: {:.1} ms",
+                                self.index_status, self.search_ms
+                            ));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if footer_action(ui, "Actions", &["Ctrl", "K"]).clicked() {
+                                        self.toggle_actions();
+                                    }
+                                    ui.label(RichText::new("│").color(Color32::from_gray(80)));
+                                    let label = if self.answer.is_some() && self.mode != Mode::Files
+                                    {
+                                        "Copy result"
+                                    } else {
+                                        "Open file"
+                                    };
+                                    if footer_action(ui, label, &["Enter"]).clicked()
+                                        && !self.settings
+                                        && !self.actions
+                                    {
+                                        self.activate(ctx);
+                                    }
+                                },
+                            );
+                        });
+                    },
+                );
+            });
+        if self.actions {
+            let items = self.action_items();
+            self.action_selected = self.action_selected.min(items.len().saturating_sub(1));
+            let mut navigated = false;
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+                self.action_selected =
+                    (self.action_selected + 1).min(items.len().saturating_sub(1));
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+                navigated = true;
+                self.action_selected = self.action_selected.saturating_sub(1);
+            }
+            let mut chosen =
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                    items.get(self.action_selected).map(|item| item.0)
+                } else {
+                    None
+                };
+            let title = if self.answer.is_some() && self.mode != Mode::Files {
+                "Calculator"
+            } else {
+                self.results
+                    .get(self.selected)
+                    .map_or("OpenCast", |e| e.name.as_str())
+            }
+            .to_owned();
+            egui::Area::new("actions".into())
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::RIGHT_BOTTOM, [-15.0, -53.0])
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(39, 35, 34))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(86, 80, 79)))
+                        .corner_radius(22)
+                        .shadow(egui::Shadow {
+                            offset: [0, 8],
+                            blur: 28,
+                            spread: 2,
+                            color: Color32::from_black_alpha(90),
+                        })
+                        .inner_margin(9)
+                        .show(ui, |ui| {
+                            ui.set_width(360.0);
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                ui.label(RichText::new(title).size(14.0).color(MUTED));
+                            });
+                            ui.add_space(12.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("actions-list")
+                                .max_height(245.0)
+                                .show(ui, |ui| {
+                                    let mut previous_group = None;
+                                    for (i, (id, label, keys)) in items.iter().enumerate() {
+                                        let group = if *id < 3 {
+                                            0
+                                        } else if *id < 5 {
+                                            1
+                                        } else {
+                                            2
+                                        };
+                                        if previous_group.is_some_and(|g| g != group) {
+                                            ui.add_space(7.0);
+                                            ui.separator();
+                                            ui.add_space(7.0);
+                                        }
+                                        previous_group = Some(group);
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            Vec2::new(ui.available_width(), 43.0),
+                                            egui::Sense::click(),
+                                        );
+                                        response.widget_info(|| {
+                                            egui::WidgetInfo::selected(
+                                                egui::WidgetType::SelectableLabel,
+                                                true,
+                                                i == self.action_selected,
+                                                *label,
+                                            )
+                                        });
+                                        if i == self.action_selected || response.hovered() {
+                                            ui.painter().rect_filled(rect, 12, SELECTED);
+                                        }
+                                        action_icon(
+                                            ui.painter(),
+                                            rect.min + Vec2::new(20.0, 21.5),
+                                            *id,
+                                        );
+                                        ui.painter().text(
+                                            rect.min + Vec2::new(44.0, 21.5),
+                                            egui::Align2::LEFT_CENTER,
+                                            *label,
+                                            FontId::proportional(15.0),
+                                            TEXT,
+                                        );
+                                        let mut right = rect.right() - 9.0;
+                                        for key in keys.split_whitespace().rev() {
+                                            right = keycap(
+                                                ui.painter(),
+                                                egui::pos2(right, rect.center().y),
+                                                key,
+                                            );
+                                        }
+                                        if response.clicked() {
+                                            chosen = Some(*id);
+                                        }
+                                        if i == self.action_selected && navigated {
+                                            response.scroll_to_me(None);
+                                        }
+                                    }
+                                    if items.is_empty() {
+                                        ui.label(RichText::new("No matching actions").color(MUTED));
+                                    }
+                                });
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            let input = ui.add(
+                                egui::TextEdit::singleline(&mut self.action_query)
+                                    .id_salt("action-search")
+                                    .font(FontId::proportional(16.0))
+                                    .hint_text("Search for actions…")
+                                    .frame(false)
+                                    .desired_width(f32::INFINITY)
+                                    .margin(Vec2::new(4.0, 3.0)),
+                            );
+                            if self.focus_actions {
+                                input.request_focus();
+                                self.focus_actions = false;
+                            }
+                            if input.changed() {
+                                self.action_selected = 0;
+                            }
+                            ui.add_space(4.0);
+                        });
+                });
+            if let Some(id) = chosen {
+                self.run_action(id, ctx);
+            }
+        }
+        if self.settings {
+            egui::Window::new("Search settings")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_width(490.0)
+                .show(ctx, |ui| {
+                    ui.add_space(10.0);
+                    ui.label("Folders to index");
+                    ui.add_space(8.0);
+                    #[cfg(windows)]
+                    if ui.button("Add folder…").clicked()
+                        && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                    {
+                        if !self.root_text.is_empty() {
+                            self.root_text.push('\n');
+                        }
+                        self.root_text.push_str(&folder.to_string_lossy());
+                    }
                     ui.label(
-                        RichText::new("/  your everyday shortcut")
+                        RichText::new("One full folder path per line. Subfolders are included.")
+                            .size(13.0)
+                            .color(MUTED),
+                    );
+                    ui.add_space(8.0);
+                    ui.add_sized(
+                        [480.0, 130.0],
+                        egui::TextEdit::multiline(&mut self.root_text)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("File names and paths only. Refreshes every 60 seconds.")
                             .size(12.0)
                             .color(MUTED),
                     );
-                    let drag = ui.allocate_response(
-                        Vec2::new((ui.available_width() - 85.0).max(0.0), 22.0),
-                        egui::Sense::drag(),
-                    );
-                    if drag.drag_started() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-                    if ui.button("⚙").on_hover_text("Settings · Ctrl+,").clicked() {
-                        self.settings = true;
-                    }
-                    if ui.button("×").on_hover_text("Close OpenCast").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                ui.add_space(19.0);
-                ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(Vec2::new(32.0, 34.0), egui::Sense::hover());
-                    ui.painter().circle_stroke(
-                        rect.min + Vec2::new(13.0, 13.0),
-                        8.0,
-                        Stroke::new(2.0_f32, ACCENT),
-                    );
-                    ui.painter().line_segment(
-                        [
-                            rect.min + Vec2::new(19.0, 19.0),
-                            rect.min + Vec2::new(26.0, 26.0),
-                        ],
-                        Stroke::new(2.0_f32, ACCENT),
-                    );
-                    let input = ui.add_sized(
-                        [ui.available_width() - 40.0, 42.0],
-                        egui::TextEdit::singleline(&mut self.query)
-                            .id_salt("search")
-                            .font(FontId::proportional(25.0))
-                            .frame(false)
-                            .hint_text("Search files or calculate…"),
-                    );
-                    if self.focus_search {
-                        input.request_focus();
-                        self.focus_search = false;
-                    }
-                    if input.changed() {
-                        self.refresh();
-                    }
-                    if !self.query.is_empty() && ui.small_button("×").clicked() {
-                        self.query.clear();
-                        self.refresh();
-                        self.focus_search = true;
-                    }
-                });
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    for (mode, title) in [
-                        (Mode::All, "All"),
-                        (Mode::Files, "Files"),
-                        (Mode::Calculator, "Calculator"),
-                    ] {
-                        if ui.selectable_label(self.mode == mode, title).clicked() {
-                            self.mode = mode;
-                            self.selected = 0;
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save folders").clicked() {
+                            self.save_roots();
+                        }
+                        if ui.button("Rebuild index").clicked() {
+                            self.reindex();
+                        }
+                        if ui.button("Done").clicked() {
+                            self.settings = false;
                             self.focus_search = true;
                         }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("LOCAL  /  OFFLINE").size(10.0).color(MUTED));
                     });
-                });
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(4.0);
-                let height = (ui.available_height() - 49.0).max(100.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("results")
-                    .auto_shrink([false, false])
-                    .max_height(height)
-                    .min_scrolled_height(height)
-                    .show(ui, |ui| {
-                        if self.mode != Mode::Files && self.answer.is_some() {
-                            let answer = self.answer.as_ref().unwrap().display();
-                            ui.add_space(14.0);
-                            egui::Frame::new()
-                                .fill(SURFACE)
-                                .corner_radius(14)
-                                .inner_margin(24)
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.label(RichText::new("CALCULATOR").size(11.0).color(ACCENT));
-                                    ui.add_space(14.0);
-                                    ui.label(RichText::new(&self.query).size(17.0).color(MUTED));
-                                    ui.add_space(8.0);
-                                    ui.label(
-                                        RichText::new(answer).monospace().size(40.0).color(TEXT),
-                                    );
-                                    ui.add_space(18.0);
-                                    if ui.button("Copy result    Enter").clicked() {
-                                        self.copy(ctx);
-                                    }
-                                });
-                            ui.add_space(16.0);
-                            ui.label(
-                                RichText::new("Calculated on your device. No connection needed.")
-                                    .size(12.0)
-                                    .color(MUTED),
-                            );
-                        } else if self.mode == Mode::Calculator {
-                            if let Some(error) = &self.calc_error {
-                                ui.colored_label(ACCENT, error);
-                            }
-                            self.examples(ui);
-                        } else if self.query.is_empty() && self.results.is_empty() {
-                            self.examples(ui);
-                        } else {
-                            if let Some(error) = &self.calc_error {
-                                ui.colored_label(ACCENT, error);
-                            }
-                            self.file_rows(ui);
-                        }
-                    });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                    ui.painter().circle_filled(
-                        dot.center(),
-                        3.0,
-                        if self.indexing { ACCENT } else { MINT },
-                    );
-                    ui.label(
-                        RichText::new(if self.indexing {
-                            "Indexing…".into()
-                        } else {
-                            format!("{} indexed", self.count)
-                        })
-                        .size(11.0)
-                        .color(MUTED),
-                    )
-                    .on_hover_text(&self.index_status);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Actions   Ctrl K").clicked() {
-                            self.actions = !self.actions;
-                        }
-                        if ui
-                            .button(if self.answer.is_some() && self.mode != Mode::Files {
-                                "Copy result  Enter"
-                            } else {
-                                "Open  Enter"
-                            })
-                            .clicked()
-                        {
-                            self.activate(ctx);
-                        }
-                        ui.label(RichText::new("Up / Down select").size(11.0).color(MUTED));
-                    });
-                });
-            });
-        if self.settings {
-            egui::Window::new("Search settings").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).default_width(510.0).show(ctx, |ui| {
-                ui.label("Folders to index");
-                #[cfg(target_os = "windows")]
-                if ui.button("Add folder…").clicked()
-                    && let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        if !self.root_text.is_empty() { self.root_text.push('\n'); }
-                        self.root_text.push_str(&folder.to_string_lossy());
-                }
-                ui.label(RichText::new("One full folder path per line. Subfolders are included.").size(13.0).color(MUTED));
-                ui.add_sized([490.0, 145.0], egui::TextEdit::multiline(&mut self.root_text).font(egui::TextStyle::Monospace).hint_text("C:\\Users\\you\\Documents"));
-                ui.label(RichText::new("Only names and paths are indexed, never file contents.\nHidden files, AppData, node_modules and target are skipped.\nThe index refreshes on launch and every 60 seconds.").size(12.0).color(MUTED));
-                ui.horizontal(|ui| {
-                    if ui.button("Save folders").clicked() { self.save_roots(); }
-                    if ui.button("Rebuild index").clicked() { self.reindex(); }
-                    if ui.button("Done").clicked() { self.settings = false; self.focus_search = true; }
-                });
-            });
-        }
-        if self.actions {
-            egui::Window::new("Actions")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::RIGHT_BOTTOM, [-28.0, -64.0])
-                .default_width(270.0)
-                .show(ctx, |ui| {
-                    if ui
-                        .button("Open / copy result                    Enter")
-                        .clicked()
-                    {
-                        self.activate(ctx);
-                        self.actions = false;
-                    }
-                    if ui
-                        .button("Copy result or path            Ctrl Shift C")
-                        .clicked()
-                    {
-                        self.copy(ctx);
-                        self.actions = false;
-                    }
-                    if ui.button("Open containing folder").clicked() {
-                        if let Some(path) = self
-                            .results
-                            .get(self.selected)
-                            .and_then(|e| e.path.parent())
-                            && let Err(e) = open::that_detached(path)
-                        {
-                            self.notify(format!("Could not open folder: {e}"));
-                        }
-                        self.actions = false;
-                    }
-                    ui.separator();
-                    if ui.button("Rebuild file index").clicked() {
-                        self.reindex();
-                        self.actions = false;
-                    }
-                    if ui
-                        .button("Search settings                         Ctrl ,")
-                        .clicked()
-                    {
-                        self.settings = true;
-                        self.actions = false;
-                    }
                 });
         }
         if let Some((message, since)) = &self.notice {
             if since.elapsed() < Duration::from_secs(5) {
                 egui::Area::new("notice".into())
-                    .order(egui::Order::Foreground)
-                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -64.0])
+                    .order(egui::Order::Tooltip)
+                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -54.0])
                     .show(ctx, |ui| {
                         egui::Frame::popup(ui.style())
                             .inner_margin(12)
@@ -817,4 +986,208 @@ impl eframe::App for OpenCast {
             }
         }
     }
+}
+
+fn clipped_text(ui: &egui::Ui, text: &str, pos: egui::Pos2, width: f32, size: f32, color: Color32) {
+    let mut job =
+        egui::text::LayoutJob::simple_singleline(text.into(), FontId::proportional(size), color);
+    job.wrap.max_width = width.max(10.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    ui.painter()
+        .galley(pos, ui.fonts_mut(|f| f.layout_job(job)), color);
+}
+fn keycap(p: &egui::Painter, right: egui::Pos2, label: &str) -> f32 {
+    let text = p.layout_no_wrap(label.into(), FontId::proportional(12.0), MUTED);
+    let size = Vec2::new((text.size().x + 12.0).max(25.0), 24.0);
+    let rect = egui::Rect::from_min_size(egui::pos2(right.x - size.x, right.y - 12.0), size);
+    p.rect_filled(rect, 7, Color32::from_white_alpha(18));
+    p.galley(rect.center() - text.size() / 2.0, text, MUTED);
+    rect.left() - 4.0
+}
+fn footer_action(ui: &mut egui::Ui, label: &str, keys: &[&str]) -> egui::Response {
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.into(), FontId::proportional(14.0), MUTED);
+    let key_width: f32 = keys
+        .iter()
+        .map(|k| {
+            (ui.painter()
+                .layout_no_wrap((*k).into(), FontId::proportional(12.0), MUTED)
+                .size()
+                .x
+                + 12.0)
+                .max(25.0)
+                + 4.0
+        })
+        .sum();
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(text.size().x + key_width + 12.0, 26.0),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    ui.painter().galley(
+        rect.left_center() - Vec2::new(0.0, text.size().y / 2.0),
+        text,
+        if response.hovered() { TEXT } else { MUTED },
+    );
+    let mut right = rect.right();
+    for key in keys.iter().rev() {
+        right = keycap(ui.painter(), egui::pos2(right, rect.center().y), key);
+    }
+    response
+}
+fn file_kind(entry: &Entry) -> (&'static str, Color32, u8) {
+    if entry.directory {
+        return ("Folder", Color32::from_rgb(77, 162, 233), 1);
+    }
+    match entry
+        .path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "pdf" => ("PDF document", Color32::from_rgb(216, 86, 83), 0),
+        "xlsx" | "csv" | "xls" => ("Spreadsheet", Color32::from_rgb(65, 164, 112), 3),
+        "png" | "jpg" | "jpeg" | "svg" | "fig" => ("Image", Color32::from_rgb(158, 119, 219), 2),
+        "rs" | "js" | "ts" | "py" | "json" | "toml" => ("Code", Color32::from_rgb(75, 148, 220), 4),
+        "md" | "txt" | "docx" => ("Document", Color32::from_rgb(129, 163, 206), 0),
+        _ => ("File", Color32::from_rgb(146, 148, 159), 0),
+    }
+}
+fn file_icon(p: &egui::Painter, r: egui::Rect, color: Color32, kind: u8) {
+    let s = Stroke::new(1.25_f32, Color32::from_white_alpha(230));
+    p.rect_filled(r, 6, color);
+    let c = r.center();
+    match kind {
+        1 => {
+            p.rect_stroke(
+                r.shrink2(Vec2::new(4.0, 6.0)),
+                2,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.line_segment([c + Vec2::new(-8.0, -6.0), c + Vec2::new(-1.0, -6.0)], s);
+        }
+        2 => {
+            p.circle_filled(c + Vec2::new(4.0, -4.0), 2.0, Color32::WHITE);
+            p.add(egui::Shape::line(
+                vec![
+                    c + Vec2::new(-8.0, 6.0),
+                    c + Vec2::new(-3.0, -1.0),
+                    c + Vec2::new(2.0, 4.0),
+                    c + Vec2::new(5.0, 1.0),
+                    c + Vec2::new(8.0, 6.0),
+                ],
+                s,
+            ));
+        }
+        3 => {
+            for offset in [-5.0, 0.0, 5.0] {
+                p.line_segment([c + Vec2::new(-7.0, offset), c + Vec2::new(7.0, offset)], s);
+            }
+            p.line_segment([c + Vec2::new(-2.0, -7.0), c + Vec2::new(-2.0, 7.0)], s);
+        }
+        4 => {
+            p.add(egui::Shape::line(
+                vec![
+                    c + Vec2::new(-6.0, -5.0),
+                    c + Vec2::new(-1.0, 0.0),
+                    c + Vec2::new(-6.0, 5.0),
+                ],
+                s,
+            ));
+            p.line_segment([c + Vec2::new(1.0, 5.0), c + Vec2::new(7.0, 5.0)], s);
+        }
+        _ => {
+            p.rect_stroke(
+                r.shrink2(Vec2::new(6.0, 4.0)),
+                1,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            for y in [-3.0, 1.0, 5.0] {
+                p.line_segment([c + Vec2::new(-3.0, y), c + Vec2::new(3.0, y)], s);
+            }
+        }
+    }
+}
+fn action_icon(p: &egui::Painter, c: egui::Pos2, id: u8) {
+    let s = Stroke::new(1.4_f32, TEXT);
+    match id {
+        3 | 4 => {
+            p.circle_stroke(c, 7.0, s);
+            p.circle_stroke(c, 2.5, s);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.0;
+                let v = Vec2::angled(a);
+                p.line_segment([c + v * 7.0, c + v * 10.0], s);
+            }
+        }
+        1 => {
+            p.rect_stroke(
+                egui::Rect::from_center_size(c, Vec2::new(12.0, 15.0)),
+                2,
+                s,
+                egui::StrokeKind::Inside,
+            );
+        }
+        8 => {
+            p.line_segment([c - Vec2::splat(6.0), c + Vec2::splat(6.0)], s);
+            p.line_segment([c + Vec2::new(6.0, -6.0), c + Vec2::new(-6.0, 6.0)], s);
+        }
+        _ => {
+            p.rect_stroke(
+                egui::Rect::from_center_size(c, Vec2::new(17.0, 13.0)),
+                3,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            p.line_segment([c + Vec2::new(-5.0, 2.0), c + Vec2::new(5.0, 2.0)], s);
+        }
+    }
+}
+fn glass(p: &egui::Painter, r: egui::Rect, backdrop: bool) {
+    // Quiet tinted fallback on systems without a desktop compositor. On Windows
+    // acrylic supplies the actual blurred desktop behind a lightly tinted mesh.
+    let mut mesh = egui::Mesh::default();
+    let color = |pos: egui::Pos2| {
+        let x = (pos.x - r.left()) / r.width();
+        let y = (pos.y - r.top()) / r.height();
+        let left = [48.0 - 17.0 * y, 42.0 - 5.0 * y, 64.0 - 10.0 * y];
+        let right = [57.0 - 12.0 * y, 46.0 - 10.0 * y, 39.0 - 3.0 * y];
+        Color32::from_rgba_unmultiplied(
+            (left[0] * (1.0 - x) + right[0] * x) as u8,
+            (left[1] * (1.0 - x) + right[1] * x) as u8,
+            (left[2] * (1.0 - x) + right[2] * x) as u8,
+            if backdrop { 38 } else { 255 },
+        )
+    };
+    mesh.colored_vertex(r.center(), color(r.center()));
+    let radius = 17.0;
+    for (corner, start) in [
+        (r.left_top() + Vec2::splat(radius), std::f32::consts::PI),
+        (
+            r.right_top() + Vec2::new(-radius, radius),
+            std::f32::consts::PI * 1.5,
+        ),
+        (r.right_bottom() - Vec2::splat(radius), 0.0),
+        (
+            r.left_bottom() + Vec2::new(radius, -radius),
+            std::f32::consts::FRAC_PI_2,
+        ),
+    ] {
+        for i in 0..=8 {
+            let pos = corner
+                + Vec2::angled(start + i as f32 / 8.0 * std::f32::consts::FRAC_PI_2) * radius;
+            mesh.colored_vertex(pos, color(pos));
+        }
+    }
+    let n = mesh.vertices.len() as u32 - 1;
+    for i in 1..=n {
+        mesh.add_triangle(0, i, if i == n { 1 } else { i + 1 });
+    }
+    p.add(mesh);
 }
