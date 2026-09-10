@@ -88,21 +88,26 @@ struct State {
 }
 impl State {
     fn show(&self, settings: bool) {
-        unsafe {
-            ShowWindow(self.app, SW_SHOW);
-            SetForegroundWindow(self.app);
-        }
-        self.ctx
-            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // Publish intent BEFORE ShowWindow can synchronously trigger a redraw.
+        // Otherwise an old blur event can hide the window during its own reopen.
         let _ = self.events.send(if settings {
             Event::Settings
         } else {
             Event::Shown
         });
+        trace("show requested");
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        unsafe {
+            ShowWindow(self.app, SW_SHOW);
+            SetForegroundWindow(self.app);
+        }
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.ctx.request_repaint();
+        trace("show completed");
     }
     fn hide(&self) {
+        trace("hotkey hide");
         unsafe {
             ShowWindow(self.app, SW_HIDE);
         }
@@ -327,6 +332,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 0
             }
             WM_HOTKEY => {
+                trace("hotkey received");
                 if IsWindowVisible(state.app) != 0 && GetForegroundWindow() == state.app {
                     state.hide();
                 } else {
@@ -535,6 +541,11 @@ unsafe fn render_icon(icon: HICON, background: u8) -> Option<Vec<u8>> {
         DeleteObject(bitmap);
         DeleteDC(dc);
         result
+    }
+}
+pub fn trace(message: &str) {
+    if std::env::var_os("OPENCAST_DIAGNOSTICS").is_some() {
+        eprintln!("OpenCast: {message}");
     }
 }
 pub fn logo_pressed() -> bool {

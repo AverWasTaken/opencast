@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$env:OPENCAST_DIAGNOSTICS = '1'
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -79,8 +80,10 @@ try {
     $resident=[LauncherTest]::FindClass('OpenCast.Resident.v2')
     if ($resident -eq [IntPtr]::Zero) { throw 'Resident message window is missing' }
     [LauncherTest]::SetForegroundWindow($window) | Out-Null
+    Write-Host 'Testing default hide'
     Press-Keys @(0x12,0x20) # Default Alt+Space hides the focused launcher.
     Wait-Visibility $window $false
+    Write-Host 'Testing default reopen'
     Press-Keys @(0x12,0x20)
     Wait-Visibility $window $true
     Save-WindowPreview $window 'windows-launcher'
@@ -132,6 +135,7 @@ try {
     Wait-Visibility $window $true
     Write-Host 'Default/custom hotkeys, recorder, persistence, background launch and single-instance activation passed.'
 } finally {
+    if (Test-Path $errorLog) {Get-Content $errorLog}
     if (!$app.HasExited) {
         Start-Process $appPath -ArgumentList '--quit' -Wait
         if (!$app.WaitForExit(5000)) { Stop-Process -Id $app.Id -Force }

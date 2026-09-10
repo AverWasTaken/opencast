@@ -313,6 +313,7 @@ impl OpenCast {
     fn dismiss(&mut self, ctx: &egui::Context) {
         #[cfg(windows)]
         if let Some(resident) = &self.resident {
+            self.was_focused = false;
             resident.hide();
             return;
         }
@@ -377,6 +378,8 @@ impl OpenCast {
         {
             match event {
                 crate::native::Event::Shown => {
+                    crate::native::trace("UI shown intent");
+                    self.was_focused = false;
                     self.cancel_recording();
                     self.settings = false;
                     self.actions = false;
@@ -385,6 +388,7 @@ impl OpenCast {
                     self.focus_search = true;
                 }
                 crate::native::Event::Settings => {
+                    self.was_focused = false;
                     self.settings = true;
                     self.actions = false;
                 }
@@ -409,6 +413,7 @@ impl OpenCast {
             && !self.quitting
             && self.resident.is_some()
         {
+            crate::native::trace("UI focus lost; dismissing");
             self.dismiss(ctx);
         }
         self.was_focused = focused;
