@@ -693,6 +693,7 @@ impl OpenCast {
                 TEXT,
             );
             if response.clicked() {
+                self.focus_search = true;
                 self.selected = i;
             }
             if response.double_clicked() {
@@ -941,6 +942,9 @@ impl eframe::App for OpenCast {
                     ui.id().with("drag"),
                     egui::Sense::drag(),
                 );
+                if drag.drag_stopped() {
+                    self.focus_search = true;
+                }
                 if drag.drag_started() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }

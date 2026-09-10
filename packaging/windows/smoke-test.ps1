@@ -6,6 +6,8 @@ public static class LauncherTest {
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int left,top,right,bottom; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd,out Rect rect);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+  public static IntPtr FindTitle(string title) { return FindWindow(null,title); }
+  public static IntPtr FindClass(string cls) { return FindWindow(cls,null); }
   public delegate bool EnumCallback(IntPtr hwnd,IntPtr data);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumCallback callback,IntPtr data);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
@@ -67,14 +69,14 @@ try {
     if ($app.HasExited) { Get-Content $errorLog; throw "App exited during startup: $($app.ExitCode)" }
     $window=[IntPtr]::Zero
     for ($attempt=0;$attempt -lt 100;$attempt++) {
-        $window=[LauncherTest]::FindWindow($null,'OpenCast')
-        $resident=[LauncherTest]::FindWindow('OpenCast.Resident.v2',$null)
+        $window=[LauncherTest]::FindTitle('OpenCast')
+        $resident=[LauncherTest]::FindClass('OpenCast.Resident.v2')
         if ($window -ne [IntPtr]::Zero -and $resident -ne [IntPtr]::Zero) { break }
         Start-Sleep -Milliseconds 300
     }
     Write-Host ([LauncherTest]::WindowList([uint32]$app.Id))
     if ($window -eq [IntPtr]::Zero) { Get-Content $errorLog; throw 'Launcher window is missing' }
-    $resident=[LauncherTest]::FindWindow('OpenCast.Resident.v2',$null)
+    $resident=[LauncherTest]::FindClass('OpenCast.Resident.v2')
     if ($resident -eq [IntPtr]::Zero) { throw 'Resident message window is missing' }
     [LauncherTest]::SetForegroundWindow($window) | Out-Null
     Press-Keys @(0x12,0x20) # Default Alt+Space hides the focused launcher.
@@ -120,8 +122,8 @@ try {
 
     $app=Start-Process $appPath -ArgumentList '--background' -PassThru
     for ($attempt=0;$attempt -lt 100;$attempt++) {
-        $window=[LauncherTest]::FindWindow($null,'OpenCast')
-        $resident=[LauncherTest]::FindWindow('OpenCast.Resident.v2',$null)
+        $window=[LauncherTest]::FindTitle('OpenCast')
+        $resident=[LauncherTest]::FindClass('OpenCast.Resident.v2')
         if($window -ne [IntPtr]::Zero -and $resident -ne [IntPtr]::Zero){break}
         Start-Sleep -Milliseconds 300
     }
