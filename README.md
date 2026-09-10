@@ -2,11 +2,11 @@
 
 An open-source, resident Windows launcher for opening apps, finding files and doing quick calculations. Written entirely in Rust, with a native GPU-rendered interface. Inspired by Raycast; an independent project with its own code and assets.
 
-![OpenCast file search](docs/file-search.png)
+![OpenCast on Windows with native application icons](docs/windows-launcher.png)
 
-![OpenCast actions](docs/actions.png)
+![Custom global shortcut settings on Windows](docs/windows-shortcut-settings.png)
 
-The compact palette uses a single search row, native Windows shell icons, and a searchable actions panel. Windows uses Segoe UI and native acrylic blur where supported. Screenshots below may show the development fallback.
+The compact palette uses a single search row, native Windows shell icons, and a searchable actions panel. Windows uses Segoe UI and native acrylic blur where supported. The screenshots above were captured from the installed Windows build during automated interaction tests.
 
 ## Install on Windows
 
