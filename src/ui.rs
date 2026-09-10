@@ -87,10 +87,13 @@ pub struct OpenCast {
     quitting: bool,
     #[cfg(windows)]
     was_focused: bool,
+    #[cfg(windows)]
+    background_start: bool,
 }
 impl OpenCast {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
+        ctx.set_theme(egui::ThemePreference::Dark);
         #[cfg(windows)]
         let backdrop = window_vibrancy::apply_acrylic(cc, Some((24, 24, 26, 175))).is_ok();
         #[cfg(not(windows))]
@@ -180,6 +183,9 @@ impl OpenCast {
                 resident.show_settings();
             }
         }
+        #[cfg(windows)]
+        let background_start =
+            runtime_error.is_none() && std::env::args().any(|a| a == "--background");
         let roots = config.roots;
         let shared = Arc::new(RwLock::new(Arc::new(Snapshot::default())));
         let (send, events) = mpsc::channel();
@@ -308,6 +314,8 @@ impl OpenCast {
             quitting: false,
             #[cfg(windows)]
             was_focused: false,
+            #[cfg(windows)]
+            background_start,
         }
     }
     fn dismiss(&mut self, ctx: &egui::Context) {
@@ -378,6 +386,7 @@ impl OpenCast {
         {
             match event {
                 crate::native::Event::Shown => {
+                    self.background_start = false;
                     crate::native::trace("UI shown intent");
                     self.was_focused = false;
                     self.cancel_recording();
@@ -388,6 +397,7 @@ impl OpenCast {
                     self.focus_search = true;
                 }
                 crate::native::Event::Settings => {
+                    self.background_start = false;
                     self.was_focused = false;
                     self.settings = true;
                     self.actions = false;
@@ -397,6 +407,12 @@ impl OpenCast {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+        }
+        if self.background_start {
+            self.background_start = false;
+            // eframe reveals its first rendered frame unconditionally. This
+            // command is applied after that first-render hook, keeping startup quiet.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quitting
@@ -539,7 +555,7 @@ impl OpenCast {
             return;
         }
         if let Some(entry) = self.results.get(self.selected) {
-            match open::that_detached(&entry.path) {
+            match open_path(&entry.path) {
                 Ok(_) => {
                     #[cfg(windows)]
                     self.dismiss(ctx);
@@ -787,7 +803,7 @@ impl OpenCast {
                     .results
                     .get(self.selected)
                     .and_then(|e| e.path.parent())
-                    && let Err(e) = open::that_detached(path)
+                    && let Err(e) = open_path(path)
                 {
                     self.notify(format!("Could not open folder: {e}"));
                 }
@@ -1047,7 +1063,14 @@ impl eframe::App for OpenCast {
                                     if footer_action(ui, "Actions", &["Ctrl", "K"]).clicked() {
                                         self.toggle_actions();
                                     }
-                                    ui.label(RichText::new("│").color(Color32::from_gray(80)));
+                                    let (divider, _) = ui.allocate_exact_size(
+                                        Vec2::new(1.0, 14.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().line_segment(
+                                        [divider.center_top(), divider.center_bottom()],
+                                        Stroke::new(1.0_f32, Color32::from_gray(80)),
+                                    );
                                     let label = if self.answer.is_some() && self.mode != Mode::Files
                                     {
                                         "Copy result"
@@ -1578,4 +1601,15 @@ fn virtual_key(key: egui::Key) -> Option<u32> {
         Quote => 222,
         _ => return None,
     })
+}
+
+fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        open::that_detached(crate::native::shell_path(path))
+    }
+    #[cfg(not(windows))]
+    {
+        open::that_detached(path)
+    }
 }

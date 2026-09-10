@@ -5,7 +5,7 @@ use opencast::shortcut::Shortcut;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     ffi::OsStr,
-    os::windows::ffi::OsStrExt,
+    os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     sync::mpsc,
     time::Duration,
@@ -400,11 +400,26 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
     }
 }
 
+/// Shell APIs are stricter than filesystem APIs about forward slashes.
+pub fn shell_path(path: &Path) -> PathBuf {
+    let units: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|c| if c == 47 { 92 } else { c })
+        .collect();
+    PathBuf::from(std::ffi::OsString::from_wide(&units))
+}
 pub fn app_roots() -> Vec<PathBuf> {
     ["APPDATA", "PROGRAMDATA"]
         .into_iter()
         .filter_map(std::env::var_os)
-        .map(|p| PathBuf::from(p).join("Microsoft/Windows/Start Menu/Programs"))
+        .map(|p| {
+            PathBuf::from(p)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+        })
         .filter(|p| p.is_dir())
         .collect()
 }
@@ -467,7 +482,7 @@ fn shell_icon(path: &Path) -> Option<egui::ColorImage> {
     unsafe {
         let mut info: SHFILEINFOW = std::mem::zeroed();
         if SHGetFileInfoW(
-            wide(path).as_ptr(),
+            wide(shell_path(path)).as_ptr(),
             0,
             &mut info,
             std::mem::size_of::<SHFILEINFOW>() as u32,
@@ -621,6 +636,14 @@ mod tests {
             CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
         }
         let image = shell_icon(&std::env::current_exe().unwrap()).expect("Shell executable icon");
+        let slash_path = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert!(
+            shell_icon(Path::new(&slash_path)).is_some(),
+            "Forward-slash paths must resolve through the Shell too"
+        );
         assert_eq!(image.size, [32, 32]);
         assert!(image.pixels.iter().any(|p| p.a() > 0));
         assert!(image.pixels.iter().any(|p| p.a() < 255));

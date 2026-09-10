@@ -86,6 +86,7 @@ try {
     Write-Host 'Testing default reopen'
     Press-Keys @(0x12,0x20)
     Wait-Visibility $window $true
+    Start-Sleep -Seconds 3
     Save-WindowPreview $window 'windows-launcher'
     Press-Keys @(0x1B) # Escape hides, with the process still alive.
     Wait-Visibility $window $false
@@ -113,6 +114,7 @@ try {
     Press-Keys @(0x11,0x10,0x4B) # Record Ctrl+Shift+K.
     $configPath=Join-Path $env:LOCALAPPDATA 'OpenCast\OpenCast\data\config.json'
     $config=Get-Content $configPath -Raw | ConvertFrom-Json
+    Write-Host "Recorded shortcut: $($config.shortcut.modifiers)/$($config.shortcut.key)"
     if($config.shortcut.modifiers -ne 6 -or $config.shortcut.key -ne 75) { throw 'Custom shortcut was not saved' }
     Save-WindowPreview $window 'windows-shortcut-settings'
     Press-Keys @(0x1B) # Close Settings.
@@ -123,6 +125,7 @@ try {
     $quit=Start-Process $appPath -ArgumentList '--quit' -PassThru -Wait
     if (!$app.WaitForExit(5000)) { throw 'Quit did not stop the resident app' }
 
+    Write-Host "Testing persisted shortcut and background startup"
     $app=Start-Process $appPath -ArgumentList '--background' -PassThru
     for ($attempt=0;$attempt -lt 100;$attempt++) {
         $window=[LauncherTest]::FindTitle('OpenCast')
