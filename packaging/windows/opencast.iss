@@ -1,5 +1,5 @@
 #if GetEnv('OPENCAST_VERSION') == ""
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.2.0"
 #else
   #define AppVersion GetEnv('OPENCAST_VERSION')
 #endif
@@ -29,13 +29,48 @@ CloseApplications=yes
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: checkedonce
 
+Name: "startup"; Description: "Start OpenCast when I sign in"; GroupDescription: "Background launcher:"; Flags: checkedonce
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OpenCast"; ValueData: """{app}\opencast.exe"" --background"; Tasks: startup; Flags: uninsdeletevalue
+
 [Files]
 Source: "..\..\target\release\opencast.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\OpenCast"; Filename: "{app}\opencast.exe"; Comment: "Search files and calculate"; HotKey: "ctrl+alt+o"
+Name: "{autoprograms}\OpenCast"; Filename: "{app}\opencast.exe"; Comment: "Search files and calculate"
 Name: "{autodesktop}\OpenCast"; Filename: "{app}\opencast.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\opencast.exe"; Description: "Launch OpenCast"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure StopResident();
+var
+  Resident: HWND;
+  Attempts: Integer;
+begin
+  Resident := FindWindowByClassName('OpenCast.Resident.v2');
+  if Resident <> 0 then
+  begin
+    PostMessage(Resident, $8003, 0, 0);
+    for Attempts := 1 to 100 do
+    begin
+      if FindWindowByClassName('OpenCast.Resident.v2') = 0 then Break;
+      Sleep(50);
+    end;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopResident();
+  Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  StopResident();
+  Result := True;
+end;

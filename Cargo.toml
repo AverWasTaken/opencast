@@ -1,6 +1,6 @@
 [package]
 name = "opencast"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "An open-source, keyboard-first desktop file launcher and calculator, built in Rust"
@@ -27,6 +27,8 @@ lto = "thin"
 strip = true
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_Security"] }
 window-vibrancy = "0.6"
 wgpu = { version = "27", default-features = false, features = ["dx12", "wgsl"] }
 eframe = { version = "0.33", default-features = false, features = ["wgpu"] }

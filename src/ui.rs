@@ -1,4 +1,5 @@
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
+use opencast::shortcut::Shortcut;
 use opencast::{
     calculator::{self, Answer},
     index::{Entry, Snapshot},
@@ -20,6 +21,13 @@ const MINT: Color32 = Color32::from_rgb(151, 218, 190);
 #[derive(Default, Serialize, Deserialize)]
 struct Config {
     roots: Vec<PathBuf>,
+    #[serde(default)]
+    shortcut: Shortcut,
+    #[serde(default = "enabled")]
+    include_apps: bool,
+}
+fn enabled() -> bool {
+    true
 }
 enum Event {
     Indexed {
@@ -67,12 +75,24 @@ pub struct OpenCast {
     action_selected: usize,
     focus_actions: bool,
     backdrop: bool,
+    shortcut: Shortcut,
+    include_apps: bool,
+    #[cfg(windows)]
+    resident: Option<crate::native::Resident>,
+    #[cfg(windows)]
+    icons: crate::native::Icons,
+    #[cfg(windows)]
+    recording: bool,
+    #[cfg(windows)]
+    quitting: bool,
+    #[cfg(windows)]
+    was_focused: bool,
 }
 impl OpenCast {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
         #[cfg(windows)]
-        let backdrop = window_vibrancy::apply_acrylic(cc, Some((25, 24, 27, 150))).is_ok();
+        let backdrop = window_vibrancy::apply_acrylic(cc, Some((24, 24, 26, 175))).is_ok();
         #[cfg(not(windows))]
         let backdrop = false;
         // Use the platform face without redistributing proprietary system fonts.
@@ -136,7 +156,30 @@ impl OpenCast {
             .and_then(|b| serde_json::from_slice::<Config>(&b).ok())
             .unwrap_or(Config {
                 roots: default_roots,
+                shortcut: Shortcut::default(),
+                include_apps: true,
             });
+        let shortcut = if config.shortcut.valid() {
+            config.shortcut
+        } else {
+            Shortcut::default()
+        };
+        let include_apps = config.include_apps;
+        #[cfg(windows)]
+        let (resident, runtime_error) = match crate::native::Resident::new(cc, shortcut) {
+            Ok(resident) => {
+                let error = resident.shortcut_error.clone();
+                (Some(resident), error)
+            }
+            Err(error) => (None, Some(error)),
+        };
+        #[cfg(windows)]
+        if runtime_error.is_some() {
+            crate::native::reveal(cc);
+            if let Some(resident) = &resident {
+                resident.show_settings();
+            }
+        }
         let roots = config.roots;
         let shared = Arc::new(RwLock::new(Arc::new(Snapshot::default())));
         let (send, events) = mpsc::channel();
@@ -168,7 +211,7 @@ impl OpenCast {
         });
         let index = shared;
         let repaint = ctx.clone();
-        let mut scan_roots = roots.clone();
+        let mut scan_roots = indexed_roots(&roots, include_apps);
         std::thread::spawn(move || {
             let cache_path = data.join("index.json");
             if let Ok(cached) = Snapshot::load(&cache_path)
@@ -221,6 +264,8 @@ impl OpenCast {
             .collect::<Vec<_>>()
             .join("\n");
         let settings = roots.is_empty();
+        #[cfg(windows)]
+        let settings = settings || runtime_error.is_some();
         Self {
             query: String::new(),
             mode: Mode::All,
@@ -240,7 +285,10 @@ impl OpenCast {
             indexing: true,
             index_status: "Building your file index…".into(),
             search_ms: 0.0,
+            #[cfg(not(windows))]
             notice: None,
+            #[cfg(windows)]
+            notice: runtime_error.map(|e| (e, Instant::now())),
             focus_search: !settings,
             pending: false,
             scroll_selected: false,
@@ -248,7 +296,192 @@ impl OpenCast {
             action_selected: 0,
             focus_actions: false,
             backdrop,
+            shortcut,
+            include_apps,
+            #[cfg(windows)]
+            resident,
+            #[cfg(windows)]
+            icons: crate::native::Icons::new(ctx.clone()),
+            #[cfg(windows)]
+            recording: false,
+            #[cfg(windows)]
+            quitting: false,
+            #[cfg(windows)]
+            was_focused: false,
         }
+    }
+    fn dismiss(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        if let Some(resident) = &self.resident {
+            resident.hide();
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+    #[cfg(windows)]
+    fn cancel_recording(&mut self) {
+        if self.recording {
+            self.recording = false;
+            if let Some(resident) = &self.resident
+                && let Err(error) = resident.recording(false)
+            {
+                self.notify(error);
+            }
+        }
+    }
+    #[cfg(windows)]
+    fn save_shortcut(&mut self, candidate: Shortcut) {
+        if !candidate.valid() {
+            self.notify("Use Ctrl, Alt or Win with a key, or a function key.");
+            return;
+        }
+        let Some(resident) = &self.resident else {
+            self.notify("Global shortcut unavailable. Restart OpenCast.");
+            return;
+        };
+        if let Err(error) = resident.set_hotkey(candidate) {
+            self.notify(error);
+            return;
+        }
+        let config = Config {
+            roots: self.roots.clone(),
+            shortcut: candidate,
+            include_apps: self.include_apps,
+        };
+        let result = (|| -> Result<(), String> {
+            std::fs::create_dir_all(self.config_path.parent().unwrap())
+                .map_err(|e| e.to_string())?;
+            std::fs::write(
+                &self.config_path,
+                serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        })();
+        if let Err(error) = result {
+            let _ = resident.set_hotkey(self.shortcut);
+            self.notify(format!("Could not save shortcut: {error}"));
+        } else {
+            self.shortcut = candidate;
+            self.notify(format!("Shortcut saved: {}", candidate.label()));
+        }
+    }
+    #[cfg(windows)]
+    fn resident_events(&mut self, ctx: &egui::Context) {
+        while let Some(event) = self
+            .resident
+            .as_ref()
+            .and_then(|r| r.events.try_recv().ok())
+        {
+            match event {
+                crate::native::Event::Shown => {
+                    self.cancel_recording();
+                    self.settings = false;
+                    self.actions = false;
+                    self.query.clear();
+                    self.refresh();
+                    self.focus_search = true;
+                }
+                crate::native::Event::Settings => {
+                    self.settings = true;
+                    self.actions = false;
+                }
+                crate::native::Event::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.quitting
+            && self.resident.is_some()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.cancel_recording();
+            self.dismiss(ctx);
+        }
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+        if self.was_focused
+            && !focused
+            && !self.settings
+            && !self.quitting
+            && self.resident.is_some()
+        {
+            self.dismiss(ctx);
+        }
+        self.was_focused = focused;
+        if self.recording {
+            let event = ctx.input(|i| {
+                i.events.iter().find_map(|e| {
+                    if let egui::Event::Key {
+                        key,
+                        modifiers,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } = e
+                    {
+                        Some((*key, *modifiers))
+                    } else {
+                        None
+                    }
+                })
+            });
+            if let Some((key, modifiers)) = event {
+                ctx.input_mut(|i| {
+                    i.events
+                        .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)))
+                });
+                self.cancel_recording();
+                if key != egui::Key::Escape {
+                    if let Some(key) = virtual_key(key) {
+                        let modifiers = (modifiers.alt as u32)
+                            | ((modifiers.ctrl as u32) << 1)
+                            | ((modifiers.shift as u32) << 2)
+                            | ((crate::native::logo_pressed() as u32) << 3);
+                        self.save_shortcut(Shortcut { modifiers, key });
+                    } else {
+                        self.notify(
+                            "That key is not supported. Try a letter, number or function key.",
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    fn shortcut_settings(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.label("Open / hide OpenCast");
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let label = if self.recording {
+                "Press your shortcut… (Escape to cancel)".into()
+            } else {
+                format!("{}   ·   Change shortcut", self.shortcut.label())
+            };
+            if ui.button(label).clicked() {
+                if self.recording {
+                    self.cancel_recording();
+                } else if let Some(resident) = &self.resident {
+                    match resident.recording(true) {
+                        Ok(()) => self.recording = true,
+                        Err(e) => self.notify(e),
+                    }
+                }
+            }
+            if ui.button("Reset").clicked() {
+                self.cancel_recording();
+                self.save_shortcut(Shortcut::default());
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Works from other apps. Shortcut changes save immediately.")
+                .size(12.0)
+                .color(MUTED),
+        );
+        ui.add_space(10.0);
+        ui.separator();
     }
     fn refresh(&mut self) {
         self.selected = 0;
@@ -292,12 +525,19 @@ impl OpenCast {
         }
         if let Some(entry) = self.results.get(self.selected) {
             match open::that_detached(&entry.path) {
-                Ok(_) => self.notify("Opened with your default application"),
+                Ok(_) => {
+                    #[cfg(windows)]
+                    self.dismiss(ctx);
+                    #[cfg(not(windows))]
+                    self.notify("Opened with your default application");
+                }
                 Err(e) => self.notify(format!("Could not open file: {e}")),
             }
         }
     }
     fn save_roots(&mut self) {
+        #[cfg(windows)]
+        self.cancel_recording();
         let mut roots = Vec::new();
         for line in self
             .root_text
@@ -321,6 +561,8 @@ impl OpenCast {
                 &self.config_path,
                 serde_json::to_vec_pretty(&Config {
                     roots: roots.clone(),
+                    shortcut: self.shortcut,
+                    include_apps: self.include_apps,
                 })
                 .map_err(|e| e.to_string())?,
             )
@@ -340,7 +582,9 @@ impl OpenCast {
     fn reindex(&mut self) {
         self.indexing = true;
         self.index_status = "Updating your file index…".into();
-        let _ = self.scan.send(self.roots.clone());
+        let _ = self
+            .scan
+            .send(indexed_roots(&self.roots, self.include_apps));
     }
     fn toggle_actions(&mut self) {
         self.actions = !self.actions;
@@ -398,12 +642,26 @@ impl OpenCast {
                 );
             }
             let (kind, color, glyph) = file_kind(entry);
-            file_icon(
-                ui.painter(),
-                egui::Rect::from_center_size(rect.min + Vec2::new(22.0, 21.5), Vec2::splat(25.0)),
-                color,
-                glyph,
-            );
+            let icon_rect =
+                egui::Rect::from_center_size(rect.min + Vec2::new(22.0, 21.5), Vec2::splat(26.0));
+            #[cfg(windows)]
+            if let Some(texture) = self.icons.get(&entry.path, ui.ctx()) {
+                ui.painter().image(
+                    texture,
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            } else {
+                placeholder_icon(ui.painter(), icon_rect);
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (color, glyph);
+                placeholder_icon(ui.painter(), icon_rect);
+            }
+            #[cfg(windows)]
+            let _ = (color, glyph);
             let label = ui
                 .painter()
                 .layout_no_wrap(kind.into(), FontId::proportional(15.0), MUTED);
@@ -528,7 +786,13 @@ impl OpenCast {
                 };
                 self.selected = 0;
             }
-            8 => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            8 => {
+                #[cfg(windows)]
+                {
+                    self.quitting = true;
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             _ => (),
         }
         self.actions = false;
@@ -541,6 +805,8 @@ impl eframe::App for OpenCast {
         [0.0; 4]
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        #[cfg(windows)]
+        self.resident_events(ctx);
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Indexed {
@@ -585,9 +851,13 @@ impl eframe::App for OpenCast {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             if self.settings || self.actions {
+                #[cfg(windows)]
+                self.cancel_recording();
                 self.settings = false;
                 self.actions = false;
                 self.focus_search = true;
+            } else if cfg!(windows) {
+                self.dismiss(ctx);
             } else if !self.query.is_empty() {
                 self.query.clear();
                 self.refresh();
@@ -763,7 +1033,15 @@ impl eframe::App for OpenCast {
                                     {
                                         "Copy result"
                                     } else {
-                                        "Open file"
+                                        if self
+                                            .results
+                                            .get(self.selected)
+                                            .is_some_and(Entry::is_application)
+                                        {
+                                            "Open application"
+                                        } else {
+                                            "Open file"
+                                        }
                                     };
                                     if footer_action(ui, label, &["Enter"]).clicked()
                                         && !self.settings
@@ -924,7 +1202,13 @@ impl eframe::App for OpenCast {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .default_width(490.0)
+                .max_height(ctx.content_rect().height() - 24.0)
+                .vscroll(true)
                 .show(ctx, |ui| {
+                    #[cfg(windows)]
+                    self.shortcut_settings(ui);
+                    ui.add_space(10.0);
+                    ui.checkbox(&mut self.include_apps, "Include Start menu applications");
                     ui.add_space(10.0);
                     ui.label("Folders to index");
                     ui.add_space(8.0);
@@ -956,13 +1240,15 @@ impl eframe::App for OpenCast {
                     );
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Save folders").clicked() {
+                        if ui.button("Save settings").clicked() {
                             self.save_roots();
                         }
                         if ui.button("Rebuild index").clicked() {
                             self.reindex();
                         }
                         if ui.button("Done").clicked() {
+                            #[cfg(windows)]
+                            self.cancel_recording();
                             self.settings = false;
                             self.focus_search = true;
                         }
@@ -1039,6 +1325,9 @@ fn footer_action(ui: &mut egui::Ui, label: &str, keys: &[&str]) -> egui::Respons
     response
 }
 fn file_kind(entry: &Entry) -> (&'static str, Color32, u8) {
+    if entry.is_application() {
+        return ("Application", Color32::GRAY, 0);
+    }
     if entry.directory {
         return ("Folder", Color32::from_rgb(77, 162, 233), 1);
     }
@@ -1157,8 +1446,8 @@ fn glass(p: &egui::Painter, r: egui::Rect, backdrop: bool) {
     let color = |pos: egui::Pos2| {
         let x = (pos.x - r.left()) / r.width();
         let y = (pos.y - r.top()) / r.height();
-        let left = [48.0 - 17.0 * y, 42.0 - 5.0 * y, 64.0 - 10.0 * y];
-        let right = [57.0 - 12.0 * y, 46.0 - 10.0 * y, 39.0 - 3.0 * y];
+        let left = [34.0 - 5.0 * y, 34.0 - 5.0 * y, 37.0 - 5.0 * y];
+        let right = [34.0 - 5.0 * y, 34.0 - 5.0 * y, 37.0 - 5.0 * y];
         Color32::from_rgba_unmultiplied(
             (left[0] * (1.0 - x) + right[0] * x) as u8,
             (left[1] * (1.0 - x) + right[1] * x) as u8,
@@ -1191,4 +1480,83 @@ fn glass(p: &egui::Painter, r: egui::Rect, backdrop: bool) {
         mesh.add_triangle(0, i, if i == n { 1 } else { i + 1 });
     }
     p.add(mesh);
+}
+
+fn indexed_roots(roots: &[PathBuf], include_apps: bool) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut roots = roots.to_vec();
+        if include_apps {
+            roots.extend(crate::native::app_roots());
+        }
+        roots
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = include_apps;
+        roots.to_vec()
+    }
+}
+fn placeholder_icon(p: &egui::Painter, r: egui::Rect) {
+    p.rect_stroke(
+        r.shrink2(Vec2::new(5.0, 2.0)),
+        3,
+        Stroke::new(1.0_f32, MUTED),
+        egui::StrokeKind::Inside,
+    );
+}
+#[cfg(windows)]
+fn virtual_key(key: egui::Key) -> Option<u32> {
+    use egui::Key::*;
+    for (base, keys) in [
+        (
+            65,
+            &[
+                A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+            ][..],
+        ),
+        (
+            48,
+            &[Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9][..],
+        ),
+        (
+            112,
+            &[
+                F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, F16, F17, F18,
+                F19, F20, F21, F22, F23, F24,
+            ][..],
+        ),
+    ] {
+        if let Some(i) = keys.iter().position(|k| *k == key) {
+            return Some(base + i as u32);
+        }
+    }
+    Some(match key {
+        Space => 32,
+        Tab => 9,
+        Enter => 13,
+        Backspace => 8,
+        Delete => 46,
+        Insert => 45,
+        Home => 36,
+        End => 35,
+        PageUp => 33,
+        PageDown => 34,
+        ArrowLeft => 37,
+        ArrowUp => 38,
+        ArrowRight => 39,
+        ArrowDown => 40,
+        Comma => 188,
+        Period => 190,
+        Minus => 189,
+        Equals => 187,
+        Semicolon => 186,
+        Slash => 191,
+        Backslash => 220,
+        OpenBracket => 219,
+        CloseBracket => 221,
+        Backtick => 192,
+        Quote => 222,
+        _ => return None,
+    })
 }

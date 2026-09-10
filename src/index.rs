@@ -17,7 +17,26 @@ pub struct Entry {
     searchable: String,
 }
 impl Entry {
+    pub fn is_application(&self) -> bool {
+        self.path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "lnk" | "exe" | "appref-ms"))
+    }
     fn prepare(&mut self) {
+        if self
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
+        {
+            self.name = self
+                .path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+        }
         self.searchable = self.path.to_string_lossy().to_lowercase();
     }
 }
@@ -136,7 +155,9 @@ impl Snapshot {
         let mut best = BinaryHeap::new();
         for (i, entry) in self.entries.iter().enumerate() {
             let name = entry.name.to_lowercase();
-            let score = if query.is_empty() || name == query {
+            let score = if query.is_empty() {
+                if entry.is_application() { 0 } else { 1 }
+            } else if name == query {
                 0
             } else if name.starts_with(&query) {
                 1
@@ -190,6 +211,18 @@ mod tests {
         assert_eq!(Snapshot::load(&path).unwrap().search("budget", 10).len(), 2);
         fs::remove_file(tmp.path().join("Budget.xlsx")).unwrap();
         assert_eq!(Snapshot::scan(&roots).entries.len(), 2);
+    }
+    #[test]
+    fn application_shortcuts_are_named_and_ranked() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["Calculator.lnk", "Calculator notes.txt"] {
+            fs::write(dir.path().join(name), "").unwrap();
+        }
+        let snapshot = Snapshot::scan(&[dir.path().to_owned()]);
+        let result = snapshot.search("calculator", 10);
+        assert_eq!(result[0].name, "Calculator");
+        assert!(result[0].is_application());
+        assert!(snapshot.search("", 10)[0].is_application());
     }
     #[test]
     fn search_benchmark() {

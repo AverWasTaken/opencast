@@ -34,5 +34,5 @@ jobs:
         with:
           name: OpenCast-windows-x64
           path: |
-            dist/*.exe
+            dist/*
             target/release/opencast.exe

@@ -2144,19 +2144,21 @@ dependencies = [
 
 [[package]]
 name = "opencast"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "eframe",
  "ignore",
  "meval",
  "open",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
  "tempfile",
  "wgpu",
  "window-vibrancy",
+ "windows-sys 0.61.2",
  "winres",
 ]
 
