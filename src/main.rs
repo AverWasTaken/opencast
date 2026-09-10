@@ -20,6 +20,7 @@ fn main() -> eframe::Result {
         "OpenCast",
         eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
+                .with_title("OpenCast")
                 .with_inner_size([740.0, 476.0])
                 .with_min_inner_size([660.0, 438.0])
                 .with_icon(

@@ -3,7 +3,18 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class LauncherTest {
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int left,top,right,bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd,out Rect rect);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+  public delegate bool EnumCallback(IntPtr hwnd,IntPtr data);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumCallback callback,IntPtr data);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd,System.Text.StringBuilder text,int length);
+  public static string WindowList(uint pid) {
+    var list=new System.Text.StringBuilder();
+    EnumWindows((hwnd,data)=>{uint owner;GetWindowThreadProcessId(hwnd,out owner);if(owner==pid){var title=new System.Text.StringBuilder(512);GetWindowText(hwnd,title,512);list.AppendLine(hwnd+" visible="+IsWindowVisible(hwnd)+" title="+title);}return true;},IntPtr.Zero);
+    return list.ToString();
+  }
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd,uint msg,IntPtr w,IntPtr l);
@@ -25,6 +36,18 @@ function Wait-Visibility($handle,[bool]$expected) {
     }
     throw "Window visibility did not become $expected"
 }
+function Save-WindowPreview($handle,[string]$name) {
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $rect=New-Object LauncherTest+Rect
+        [LauncherTest]::GetWindowRect($handle,[ref]$rect) | Out-Null
+        $bitmap=New-Object System.Drawing.Bitmap ($rect.right-$rect.left),($rect.bottom-$rect.top)
+        $graphics=[System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($rect.left,$rect.top,0,0,$bitmap.Size)
+        $bitmap.Save((Join-Path (Get-Location) "dist/$name.png"),[System.Drawing.Imaging.ImageFormat]::Png)
+        $graphics.Dispose();$bitmap.Dispose()
+    } catch { Write-Warning "Screenshot unavailable: $_" }
+}
 $installer = Get-ChildItem dist/*-setup.exe | Select-Object -First 1
 if (!$installer) { throw 'Installer was not produced' }
 $installDir = Join-Path $env:RUNNER_TEMP 'OpenCast install test'
@@ -34,14 +57,23 @@ $appPath = Join-Path $installDir 'opencast.exe'
 if (!(Test-Path $appPath)) { throw 'Installed executable is missing' }
 $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'OpenCast.lnk'
 if (!(Test-Path $shortcut)) { throw 'Start menu shortcut is missing' }
+$configPath=Join-Path $env:LOCALAPPDATA 'OpenCast\OpenCast\data\config.json'
+if (Test-Path $configPath) { Remove-Item $configPath }
 $errorLog = Join-Path $env:RUNNER_TEMP 'opencast-startup.log'
 $app = Start-Process $appPath -PassThru -RedirectStandardError $errorLog
 try {
     Start-Sleep -Seconds 5
     $app.Refresh()
     if ($app.HasExited) { Get-Content $errorLog; throw "App exited during startup: $($app.ExitCode)" }
-    $window=[LauncherTest]::FindWindow($null,'OpenCast')
-    if ($window -eq [IntPtr]::Zero) { throw 'Launcher window is missing' }
+    $window=[IntPtr]::Zero
+    for ($attempt=0;$attempt -lt 100;$attempt++) {
+        $window=[LauncherTest]::FindWindow($null,'OpenCast')
+        $resident=[LauncherTest]::FindWindow('OpenCast.Resident.v2',$null)
+        if ($window -ne [IntPtr]::Zero -and $resident -ne [IntPtr]::Zero) { break }
+        Start-Sleep -Milliseconds 300
+    }
+    Write-Host ([LauncherTest]::WindowList([uint32]$app.Id))
+    if ($window -eq [IntPtr]::Zero) { Get-Content $errorLog; throw 'Launcher window is missing' }
     $resident=[LauncherTest]::FindWindow('OpenCast.Resident.v2',$null)
     if ($resident -eq [IntPtr]::Zero) { throw 'Resident message window is missing' }
     [LauncherTest]::SetForegroundWindow($window) | Out-Null
@@ -49,6 +81,7 @@ try {
     Wait-Visibility $window $false
     Press-Keys @(0x12,0x20)
     Wait-Visibility $window $true
+    Save-WindowPreview $window 'windows-launcher'
     Press-Keys @(0x1B) # Escape hides, with the process still alive.
     Wait-Visibility $window $false
     $second=Start-Process $appPath -PassThru
@@ -76,6 +109,7 @@ try {
     $configPath=Join-Path $env:LOCALAPPDATA 'OpenCast\OpenCast\data\config.json'
     $config=Get-Content $configPath -Raw | ConvertFrom-Json
     if($config.shortcut.modifiers -ne 6 -or $config.shortcut.key -ne 75) { throw 'Custom shortcut was not saved' }
+    Save-WindowPreview $window 'windows-shortcut-settings'
     Press-Keys @(0x1B) # Close Settings.
     Press-Keys @(0x11,0x10,0x4B)
     Wait-Visibility $window $false
@@ -85,8 +119,12 @@ try {
     if (!$app.WaitForExit(5000)) { throw 'Quit did not stop the resident app' }
 
     $app=Start-Process $appPath -ArgumentList '--background' -PassThru
-    Start-Sleep -Seconds 4
-    $window=[LauncherTest]::FindWindow($null,'OpenCast')
+    for ($attempt=0;$attempt -lt 100;$attempt++) {
+        $window=[LauncherTest]::FindWindow($null,'OpenCast')
+        $resident=[LauncherTest]::FindWindow('OpenCast.Resident.v2',$null)
+        if($window -ne [IntPtr]::Zero -and $resident -ne [IntPtr]::Zero){break}
+        Start-Sleep -Milliseconds 300
+    }
     Wait-Visibility $window $false
     Press-Keys @(0x11,0x10,0x4B)
     Wait-Visibility $window $true

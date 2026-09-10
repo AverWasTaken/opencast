@@ -362,6 +362,9 @@ impl OpenCast {
             self.notify(format!("Could not save shortcut: {error}"));
         } else {
             self.shortcut = candidate;
+            if let Some(resident) = &mut self.resident {
+                resident.shortcut_error = None;
+            }
             self.notify(format!("Shortcut saved: {}", candidate.label()));
         }
     }
@@ -452,6 +455,13 @@ impl OpenCast {
     fn shortcut_settings(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.label("Open / hide OpenCast");
+        if let Some(error) = self
+            .resident
+            .as_ref()
+            .and_then(|r| r.shortcut_error.as_ref())
+        {
+            ui.label(RichText::new(error).color(Color32::from_rgb(239, 170, 125)));
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             let label = if self.recording {
@@ -940,7 +950,7 @@ impl eframe::App for OpenCast {
                         let hint = match self.mode {
                             Mode::Files => "Search files…",
                             Mode::Calculator => "Calculate or convert…",
-                            Mode::All => "Search files or calculate…",
+                            Mode::All => "Search apps, files or calculate…",
                         };
                         let input = ui.add_enabled(
                             !self.actions && !self.settings,

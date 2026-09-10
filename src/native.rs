@@ -84,6 +84,7 @@ struct State {
     hotkey: Shortcut,
     tray: NOTIFYICONDATAW,
     icon: HICON,
+    taskbar_message: u32,
 }
 impl State {
     fn show(&self, settings: bool) {
@@ -207,6 +208,7 @@ impl Resident {
                 hotkey: shortcut,
                 tray,
                 icon,
+                taskbar_message: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             });
             let shortcut_error = if state.change_key(hwnd, shortcut) {
                 None
@@ -383,6 +385,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 PostQuitMessage(0);
                 0
             }
+            message if message != 0 && message == state.taskbar_message => {
+                Shell_NotifyIconW(NIM_ADD, &state.tray);
+                0
+            }
             _ => DefWindowProcW(hwnd, msg, w, l),
         }
     }
@@ -549,6 +555,55 @@ pub fn reveal(cc: &eframe::CreationContext<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn occupied_shortcut_preserves_previous_registration() {
+        let original = Shortcut {
+            modifiers: 7,
+            key: 134,
+        };
+        let occupied = Shortcut {
+            modifiers: 7,
+            key: 135,
+        };
+        let (ready, wait) = mpsc::sync_channel(1);
+        let (release, done) = mpsc::sync_channel(1);
+        let blocker = std::thread::spawn(move || unsafe {
+            assert_ne!(
+                RegisterHotKey(
+                    std::ptr::null_mut(),
+                    99,
+                    occupied.modifiers | MOD_NOREPEAT,
+                    occupied.key
+                ),
+                0
+            );
+            ready.send(()).unwrap();
+            done.recv().unwrap();
+            UnregisterHotKey(std::ptr::null_mut(), 99);
+        });
+        wait.recv().unwrap();
+        let (events, _) = mpsc::channel();
+        let mut state = State {
+            app: std::ptr::null_mut(),
+            ctx: egui::Context::default(),
+            events,
+            hotkey_id: 0,
+            hotkey: original,
+            tray: unsafe { std::mem::zeroed() },
+            icon: std::ptr::null_mut(),
+            taskbar_message: 0,
+        };
+        assert!(state.change_key(std::ptr::null_mut(), original));
+        let previous_id = state.hotkey_id;
+        assert!(!state.change_key(std::ptr::null_mut(), occupied));
+        assert_eq!(state.hotkey, original);
+        assert_eq!(state.hotkey_id, previous_id);
+        unsafe {
+            UnregisterHotKey(std::ptr::null_mut(), state.hotkey_id);
+        }
+        release.send(()).unwrap();
+        blocker.join().unwrap();
+    }
     #[test]
     fn shell_icons_have_pixels_and_transparency() {
         unsafe {
